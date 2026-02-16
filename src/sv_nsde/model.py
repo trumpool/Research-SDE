@@ -465,10 +465,13 @@ class SVNSDELite(nn.Module):
         device = event_marks.device
         n_events = len(event_times)
 
+        # Project embeddings from d_input to d_latent
+        projected_marks = self.projection(event_marks)
+
         # Solve SDE
         sde_output = self.sde.solve(
             event_times=event_times,
-            event_marks=event_marks,
+            event_marks=projected_marks,
             T=T,
             dt=self.dt,
             batch_size=n_samples,
@@ -499,7 +502,7 @@ class SVNSDELite(nn.Module):
         if z_events is not None and n_events > 0:
             recon_loss = torch.zeros(n_samples, device=device)
             for i in range(n_events):
-                x_i = event_marks[i].unsqueeze(0).expand(n_samples, -1)
+                x_i = projected_marks[i].unsqueeze(0).expand(n_samples, -1)
                 log_p = self.decoder.log_prob(x_i, z_events[i])
                 recon_loss += log_p
             recon_loss = recon_loss.mean()
