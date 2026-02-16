@@ -343,7 +343,7 @@ class NeuralHestonSDE(nn.Module):
                 event_t = event_times[event_idx].item()
                 if event_t > t:
                     dt_to_event = event_t - t
-                    z, v = self.euler_maruyama_step(z, v, torch.tensor(t), dt_to_event)
+                    z, v = self.euler_maruyama_step(z, v, torch.tensor(t, device=z.device), dt_to_event)
 
                 # Store pre-jump state
                 z_at_events.append(z.clone())
@@ -357,7 +357,7 @@ class NeuralHestonSDE(nn.Module):
                 event_idx += 1
             else:
                 # Regular diffusion step
-                z, v = self.euler_maruyama_step(z, v, torch.tensor(t), dt)
+                z, v = self.euler_maruyama_step(z, v, torch.tensor(t, device=z.device), dt)
                 t = next_t
 
             if return_full_trajectory:
