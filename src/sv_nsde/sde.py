@@ -334,7 +334,7 @@ class NeuralHestonSDE(nn.Module):
         t = 0.0
         event_idx = 0
 
-        while t < T:
+        while t < T or event_idx < n_events:
             next_t = t + dt
 
             # Check if event occurs before next_t
