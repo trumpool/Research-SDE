@@ -524,3 +524,68 @@ class SVNSDELite(nn.Module):
             "kl": kl_loss,
             "elbo": elbo,
         }
+
+    def get_volatility_decomposition(
+        self,
+        event_times: torch.Tensor,
+        event_marks: torch.Tensor,
+        T: float,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Decompose intensity into trend and volatility components.
+
+        Args:
+            event_times: Event timestamps [n_events]
+            event_marks: Pre-computed embeddings [n_events, d_input]
+            T: Terminal time
+
+        Returns:
+            Dictionary with decomposition results
+        """
+        # Project from d_input to d_latent
+        projected_marks = self.projection(event_marks)
+
+        # Solve SDE
+        sde_output = self.sde.solve(
+            event_times=event_times,
+            event_marks=projected_marks,
+            T=T,
+            dt=self.dt,
+            batch_size=1,
+            return_full_trajectory=True,
+        )
+
+        z_events = sde_output["z_events"].squeeze(1)  # [n_events, d_latent]
+        v_events = sde_output["v_events"].squeeze(1)
+
+        # Get intensity components
+        trend_contribs = []
+        vol_contribs = []
+        total_intensities = []
+
+        for i in range(len(event_times)):
+            intensity, components = self.intensity(
+                z_events[i:i+1],
+                v_events[i:i+1],
+                return_components=True,
+            )
+            trend_contribs.append(components["trend_contrib"].item())
+            vol_contribs.append(components["vol_contrib"].item())
+            total_intensities.append(intensity.item())
+
+        trend_contribs = torch.tensor(trend_contribs)
+        vol_contribs = torch.tensor(vol_contribs)
+
+        vol_ratio = vol_contribs / (trend_contribs + vol_contribs + 1e-8)
+        is_panic_driven = vol_ratio > 0.5
+
+        return {
+            "event_times": event_times,
+            "trend_contribution": trend_contribs,
+            "volatility_contribution": vol_contribs,
+            "total_intensity": torch.tensor(total_intensities),
+            "volatility_ratio": vol_ratio,
+            "is_panic_driven": is_panic_driven,
+            "z_states": z_events,
+            "v_states": v_events,
+        }

@@ -19,6 +19,13 @@ from .baselines import (
     BASELINE_MODELS, get_baseline,
 )
 from .evaluate import Evaluator, EvaluationMetrics, VolatilityAnalyzer, run_full_evaluation
+from .experiment import (
+    TrainConfig,
+    precompute_bert_embeddings,
+    train_model,
+    train_all_baselines,
+    run_comparison,
+)
 
 __all__ = [
     # Core model
@@ -49,6 +56,12 @@ __all__ = [
     "EvaluationMetrics",
     "VolatilityAnalyzer",
     "run_full_evaluation",
+    # Experiment workflows
+    "TrainConfig",
+    "precompute_bert_embeddings",
+    "train_model",
+    "train_all_baselines",
+    "run_comparison",
 ]
 
 __version__ = "0.1.0"
