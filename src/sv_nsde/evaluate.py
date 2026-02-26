@@ -204,8 +204,13 @@ class Evaluator:
             if precomputed_embeddings and cascade.cascade_id in precomputed_embeddings:
                 event_marks = precomputed_embeddings[cascade.cascade_id].to(self.device)
             else:
-                # Use random embeddings for testing
-                event_marks = torch.randn(cascade.size, 32).to(self.device)
+                # Use random embeddings for testing (infer dim from model)
+                d_input = getattr(model, 'd_input', 768)
+                if hasattr(model, 'input_proj'):
+                    d_input = model.input_proj.in_features
+                elif hasattr(model, 'projection'):
+                    d_input = model.projection[0].in_features if hasattr(model.projection, '__getitem__') else 768
+                event_marks = torch.randn(cascade.size, d_input).to(self.device)
 
             event_times = cascade.event_times.to(self.device)
             T = event_times.max().item() * 1.1  # Add 10% buffer
@@ -230,74 +235,96 @@ class Evaluator:
 
             # 2. Time prediction (predict each event given history)
             with torch.no_grad():
-                for i in range(1, min(n_events, 50)):  # Limit for efficiency
-                    # Use history up to event i-1
-                    history_times = event_times_norm[:i]
-                    history_marks = event_marks[:i]
+                try:
+                    outputs = model.forward(event_times_norm, event_marks, T=1.0)
 
-                    # Simple prediction: use intensity to estimate next time
-                    try:
-                        # Get model state
-                        if hasattr(model, 'forward'):
-                            outputs = model.forward(
-                                history_times, history_marks,
-                                T=event_times_norm[i].item()
-                            )
+                    for i in range(1, min(n_events, 50)):
+                        lam = None
 
-                        # Predict using exponential with estimated rate
-                        if hasattr(model, 'intensity'):
-                            if 'z_events' in outputs and outputs['z_events'] is not None:
-                                z_last = outputs['z_events'][-1:]
-                                if hasattr(outputs, 'get') and 'v_events' in outputs:
-                                    v_last = outputs['v_events'][-1:]
-                                    lam = model.intensity(z_last, v_last)
-                                else:
-                                    lam = model.intensity(z_last)
+                        # SV-NSDE / LatentODE / NeuralJumpSDE: have z_events
+                        if 'z_events' in outputs and outputs['z_events'] is not None:
+                            z_last = outputs['z_events'][i - 1:i]
+                            if 'v_events' in outputs and outputs['v_events'] is not None:
+                                v_last = outputs['v_events'][i - 1:i]
+                                lam = model.intensity(z_last, v_last)
+                            else:
+                                lam = model.intensity(z_last)
 
-                                if isinstance(lam, torch.Tensor):
-                                    lam = lam.mean().item()
+                        # RMTPP: has hidden_states and intensity(h, t, t_last)
+                        elif 'hidden_states' in outputs:
+                            h = outputs['hidden_states']
+                            if hasattr(model, 'w') and hasattr(model, 'b'):
+                                # RMTPP intensity
+                                lam = model.intensity(
+                                    h[i - 1:i],
+                                    event_times_norm[i],
+                                    event_times_norm[i - 1],
+                                )
+                            elif 'cell_states' in outputs and 'decays' in outputs:
+                                # NeuralHawkes intensity
+                                dt = event_times_norm[i] - event_times_norm[i - 1]
+                                lam = model.intensity_at_time(
+                                    outputs['cell_states'][i - 1],
+                                    outputs.get('c_bar', torch.zeros_like(outputs['cell_states'][0])),
+                                    outputs['decays'][i - 1],
+                                    dt,
+                                )
 
-                                # Expected next time: t_last + 1/λ
-                                predicted_dt = 1.0 / (lam + 1e-8)
-                                predicted_t = history_times[-1].item() + predicted_dt
-                                actual_t = event_times_norm[i].item()
+                        if lam is not None:
+                            if isinstance(lam, torch.Tensor):
+                                lam = lam.mean().item()
+                            predicted_dt = 1.0 / (lam + 1e-8)
+                            predicted_t = event_times_norm[i - 1].item() + predicted_dt
+                            actual_t = event_times_norm[i].item()
+                            all_time_errors.append(abs(predicted_t - actual_t))
 
-                                all_time_errors.append(abs(predicted_t - actual_t))
-
-                    except Exception:
-                        pass
+                except Exception as e:
+                    logger.debug(f"Time prediction failed for {cascade.cascade_id}: {e}")
 
             # 3. Semantic prediction (predict next mark)
             with torch.no_grad():
                 try:
-                    if hasattr(model, 'decoder') or hasattr(model, 'mark_decoder'):
-                        outputs = model.forward(event_times_norm[:-1], event_marks[:-1], 1.0)
+                    outputs = model.forward(event_times_norm, event_marks, T=1.0)
+                    predicted = None
 
-                        if 'z_events' in outputs and outputs['z_events'] is not None:
-                            z_events = outputs['z_events']
+                    # SV-NSDE / LatentODE / NeuralJumpSDE: z_events + decoder
+                    if 'z_events' in outputs and outputs['z_events'] is not None:
+                        z_events = outputs['z_events']
+                        z_for_pred = z_events[:-1]  # Use state at event i to predict mark i+1
+                        if z_for_pred.dim() == 3:
+                            z_for_pred = z_for_pred.squeeze(1)
+                        if hasattr(model, 'decoder') and hasattr(model.decoder, 'forward'):
+                            predicted = model.decoder(z_for_pred)
+                        elif hasattr(model, 'decoder') and callable(model.decoder):
+                            predicted = model.decoder(z_for_pred)
 
-                            if hasattr(model, 'decoder'):
-                                if hasattr(model.decoder, 'forward'):
-                                    predicted = model.decoder(z_events.squeeze(1))
-                                else:
-                                    predicted = model.decoder(z_events.squeeze(1))
-                            elif hasattr(model, 'mark_decoder'):
-                                predicted = model.mark_decoder(z_events.squeeze(1))
+                    # RMTPP / NeuralHawkes: hidden_states + mark_decoder
+                    elif 'hidden_states' in outputs and hasattr(model, 'mark_decoder'):
+                        h = outputs['hidden_states']
+                        predicted = model.mark_decoder(h[:-1])  # [n-1, d_latent]
+
+                    if predicted is not None and len(predicted) > 0:
+                        # Project actual marks to same space for comparison
+                        actual = event_marks[1:len(predicted) + 1]
+                        if hasattr(model, 'mark_target_proj'):
+                            actual = model.mark_target_proj(actual)
+                        elif hasattr(model, 'input_proj') and predicted.shape[-1] != actual.shape[-1]:
+                            # For models where decoder outputs d_latent but marks are d_input
+                            if hasattr(model, 'projection'):
+                                actual = model.projection(actual)
                             else:
-                                predicted = z_events.squeeze(1)
+                                actual = actual[:, :predicted.shape[-1]]
 
-                            # Compare with actual next marks
-                            actual = event_marks[1:len(predicted) + 1]
-                            if len(predicted) > 0 and len(actual) > 0:
-                                min_len = min(len(predicted), len(actual))
-                                mse, cosine = self.metric_computer.compute_semantic_metrics(
-                                    predicted[:min_len], actual[:min_len]
-                                )
-                                all_semantic_mse.append(mse)
-                                all_semantic_cosine.append(cosine)
+                        min_len = min(len(predicted), len(actual))
+                        if min_len > 0:
+                            mse, cosine = self.metric_computer.compute_semantic_metrics(
+                                predicted[:min_len], actual[:min_len]
+                            )
+                            all_semantic_mse.append(mse)
+                            all_semantic_cosine.append(cosine)
 
                 except Exception as e:
-                    pass
+                    logger.debug(f"Semantic prediction failed for {cascade.cascade_id}: {e}")
 
         # Aggregate metrics
         time_rmse = np.sqrt(np.mean([e**2 for e in all_time_errors])) if all_time_errors else float('nan')

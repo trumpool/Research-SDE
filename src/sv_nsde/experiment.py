@@ -167,7 +167,11 @@ def train_model(
             try:
                 loss_dict = model.compute_loss(event_times, event_marks, T=1.0)
                 loss = loss_dict["loss"]
-            except Exception:
+                if torch.isnan(loss) or torch.isinf(loss):
+                    continue
+            except Exception as e:
+                if epoch == 1 and n_batches == 0:
+                    print(f"    ⚠️ compute_loss error: {e}")
                 continue
 
             optimizer.zero_grad()
@@ -202,8 +206,10 @@ def train_model(
 
                 try:
                     loss_dict = model.compute_loss(event_times, event_marks, T=1.0)
-                    val_loss += loss_dict["loss"].item()
-                    n_val += 1
+                    loss_val = loss_dict["loss"].item()
+                    if not (np.isnan(loss_val) or np.isinf(loss_val)):
+                        val_loss += loss_val
+                        n_val += 1
                 except Exception:
                     continue
 

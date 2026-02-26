@@ -67,6 +67,9 @@ class RMTPP(nn.Module):
             nn.Linear(d_hidden, d_latent),
         )
 
+        # Target projection for mark loss (d_input -> d_latent)
+        self.mark_target_proj = nn.Linear(d_input, d_latent)
+
     def forward(
         self,
         event_times: torch.Tensor,
@@ -162,10 +165,10 @@ class RMTPP(nn.Module):
             else:
                 integral += torch.exp(vh + self.b) * (t_end - t_start)
 
-        # Mark prediction loss
-        predicted_marks = self.mark_decoder(h[:-1])  # Predict next mark
-        target_marks = event_marks[1:]
-        mark_loss = F.mse_loss(predicted_marks, target_marks)
+        # Mark prediction loss (project targets to d_latent space)
+        predicted_marks = self.mark_decoder(h[:-1])  # [n-1, d_latent]
+        target_marks_proj = self.mark_target_proj(event_marks[1:])  # [n-1, d_latent]
+        mark_loss = F.mse_loss(predicted_marks, target_marks_proj)
 
         loss = -log_intensity_sum + integral + mark_loss
 
@@ -255,6 +258,9 @@ class NeuralHawkes(nn.Module):
             nn.ReLU(),
             nn.Linear(d_hidden, d_latent),
         )
+
+        # Target projection for mark loss (d_input -> d_latent)
+        self.mark_target_proj = nn.Linear(d_input, d_latent)
 
     def forward(
         self,
@@ -356,9 +362,10 @@ class NeuralHawkes(nn.Module):
                     lam = self.intensity_at_time(c[i], c_bar, decays[i], dt)
                     integral += lam.squeeze() * interval / n_mc_samples
 
-        # Mark loss
-        predicted_marks = self.mark_decoder(h[:-1])
-        mark_loss = F.mse_loss(predicted_marks, event_marks[1:])
+        # Mark loss (project targets to d_latent space)
+        predicted_marks = self.mark_decoder(h[:-1])  # [n-1, d_latent]
+        target_marks_proj = self.mark_target_proj(event_marks[1:])  # [n-1, d_latent]
+        mark_loss = F.mse_loss(predicted_marks, target_marks_proj)
 
         loss = -log_intensity_sum + integral + mark_loss
 
